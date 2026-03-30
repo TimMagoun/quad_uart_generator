@@ -1,0 +1,33 @@
+diff --git a/libraries/Adafruit_TinyUSB_Arduino/src/arduino/Adafruit_USBD_Device.h b/libraries/Adafruit_TinyUSB_Arduino/src/arduino/Adafruit_USBD_Device.h
+index 48c4d38..eedd4f4 100644
+--- a/libraries/Adafruit_TinyUSB_Arduino/src/arduino/Adafruit_USBD_Device.h
++++ b/libraries/Adafruit_TinyUSB_Arduino/src/arduino/Adafruit_USBD_Device.h
+@@ -44,7 +44,7 @@ private:
+ 
+   // Configuration descriptor
+   uint8_t *_desc_cfg;
+-  uint8_t _desc_cfg_buffer[256];
++  uint8_t _desc_cfg_buffer[1024];
+   uint16_t _desc_cfg_len;
+   uint16_t _desc_cfg_maxlen;
+ 
+@@ -164,4 +164,4 @@ extern Adafruit_USBD_Device TinyUSBDevice;
+ #endif
+ 
+ #endif /* CFG_TUD_ENABLED */
+-#endif /* ADAFRUIT_USBD_DEVICE_H_ */
+\ No newline at end of file
++#endif /* ADAFRUIT_USBD_DEVICE_H_ */
+diff --git a/libraries/Adafruit_TinyUSB_Arduino/src/arduino/ports/rp2040/tusb_config_rp2040.h b/libraries/Adafruit_TinyUSB_Arduino/src/arduino/ports/rp2040/tusb_config_rp2040.h
+index 2a207c5..08ae62e 100644
+--- a/libraries/Adafruit_TinyUSB_Arduino/src/arduino/ports/rp2040/tusb_config_rp2040.h
++++ b/libraries/Adafruit_TinyUSB_Arduino/src/arduino/ports/rp2040/tusb_config_rp2040.h
+@@ -82,7 +82,7 @@ extern "C" {
+ #define CFG_TUD_ENDPOINT0_SIZE 64
+ 
+ #ifndef CFG_TUD_CDC
+-#define CFG_TUD_CDC 2
++#define CFG_TUD_CDC 7
+ #endif
+ #ifndef CFG_TUD_MSC
+ #define CFG_TUD_MSC 1

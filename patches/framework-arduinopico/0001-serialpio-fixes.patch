@@ -1,0 +1,201 @@
+diff --git a/cores/rp2040/SerialPIO.cpp b/cores/rp2040/SerialPIO.cpp
+index 5b8f98f..b9066b8 100644
+--- a/cores/rp2040/SerialPIO.cpp
++++ b/cores/rp2040/SerialPIO.cpp
+@@ -95,15 +95,17 @@ void __not_in_flash_func(SerialPIO::_handleIRQ)() {
+     while (!pio_sm_is_rx_fifo_empty(_rxPIO, _rxSM)) {
+         uint32_t decode = _rxPIO->rxf[_rxSM];
+         uint32_t val = decode >> (32 - _rxBits - 1);
++        uint32_t dataMask = (1u << _bits) - 1u;
++        uint32_t dataOnly = val & dataMask;
+         if (_parity == UART_PARITY_EVEN) {
+-            int p = ::_parity(val);
++            int p = ::_parity(dataOnly);
+             int r = (val & (1 << _bits)) ? 1 : 0;
+             if (p != r) {
+                 // TODO - parity error
+                 continue;
+             }
+         } else if (_parity == UART_PARITY_ODD) {
+-            int p = ::_parity(val);
++            int p = ::_parity(dataOnly);
+             int r = (val & (1 << _bits)) ? 1 : 0;
+             if (p == r) {
+                 // TODO - parity error
+@@ -148,6 +150,9 @@ static int pio_irq_0(PIO p) {
+ }
+ 
+ void SerialPIO::begin(unsigned long baud, uint16_t config) {
++    // Always release any existing or partially initialized state first.
++    end();
++
+     _onCore = get_core_num();
+     _overflow = false;
+     _baud = baud;
+@@ -193,12 +198,18 @@ void SerialPIO::begin(unsigned long baud, uint16_t config) {
+     if (_tx != NOPIN) {
+         _txBits = _bits + _stop + (_parity != UART_PARITY_NONE ? 1 : 0) + 1/*start bit*/;
+         _txPgm = _getTxProgram(_txBits);
++        if (!_txPgm) {
++            DEBUGCORE("ERROR: Unable to allocate PIO TX UART program\n");
++            end();
++            return;
++        }
+         int off;
+         if (!_txPgm->prepare(&_txPIO, &_txSM, &off, _tx, 1)) {
+             DEBUGCORE("ERROR: Unable to allocate PIO TX UART, out of PIO resources\n");
+-            // ERROR, no free slots
++            end();
+             return;
+         }
++        _txClaimed = true;
+ 
+         digitalWrite(_tx, HIGH);
+         pinMode(_tx, OUTPUT);
+@@ -214,17 +225,25 @@ void SerialPIO::begin(unsigned long baud, uint16_t config) {
+         // Start running!
+         gpio_set_outover(_tx, _invertTX);
+         pio_sm_set_enabled(_txPIO, _txSM, true);
++        _txEnabled = true;
+     }
+     if (_rx != NOPIN) {
+         _queue->reset();
+ 
+         _rxBits = _bits + (_parity != UART_PARITY_NONE ? 1 : 0);
+         _rxPgm = _getRxProgram(_rxBits);
++        if (!_rxPgm) {
++            DEBUGCORE("ERROR: Unable to allocate PIO RX UART program\n");
++            end();
++            return;
++        }
+         int off;
+         if (!_rxPgm->prepare(&_rxPIO, &_rxSM, &off, _rx, 1)) {
+             DEBUGCORE("ERROR: Unable to allocate PIO RX UART, out of PIO resources\n");
++            end();
+             return;
+         }
++        _rxClaimed = true;
+         // Stash away the created RX port for the IRQ handler
+         _pioSP[pio_get_index(_rxPIO)][_rxSM] = this;
+ 
+@@ -252,24 +271,45 @@ void SerialPIO::begin(unsigned long baud, uint16_t config) {
+ 
+         gpio_set_inover(_rx, _invertRX);
+         pio_sm_set_enabled(_rxPIO, _rxSM, true);
++        _rxEnabled = true;
+     }
+ 
+     _running = true;
+ }
+ 
+ void SerialPIO::end() {
+-    if (!_running) {
+-        return;
+-    }
+-    if (_tx != NOPIN) {
+-        pio_sm_set_enabled(_txPIO, _txSM, false);
++    if ((_tx != NOPIN) && _txClaimed) {
++        if (_txEnabled) {
++            pio_sm_set_enabled(_txPIO, _txSM, false);
++        }
+         pio_sm_unclaim(_txPIO, _txSM);
++        _txClaimed = false;
++        _txEnabled = false;
++        _txSM = -1;
++        _txPIO = nullptr;
++    }
++    if ((_tx != NOPIN) && !_txClaimed) {
+         gpio_set_outover(_tx, 0);
+     }
+-    if (_rx != NOPIN) {
+-        pio_sm_set_enabled(_rxPIO, _rxSM, false);
+-        pio_sm_unclaim(_rxPIO, _rxSM);
++    if ((_rx != NOPIN) && _rxClaimed) {
++        if (_rxEnabled) {
++            pio_sm_set_enabled(_rxPIO, _rxSM, false);
++        }
+         _pioSP[pio_get_index(_rxPIO)][_rxSM] = nullptr;
++
++        switch (_rxSM) {
++        case 0: pio_set_irq0_source_enabled(_rxPIO, pis_sm0_rx_fifo_not_empty, false); break;
++        case 1: pio_set_irq0_source_enabled(_rxPIO, pis_sm1_rx_fifo_not_empty, false); break;
++        case 2: pio_set_irq0_source_enabled(_rxPIO, pis_sm2_rx_fifo_not_empty, false); break;
++        case 3: pio_set_irq0_source_enabled(_rxPIO, pis_sm3_rx_fifo_not_empty, false); break;
++        default: break;
++        }
++
++        pio_sm_unclaim(_rxPIO, _rxSM);
++        _rxClaimed = false;
++        _rxEnabled = false;
++        _rxSM = -1;
++
+         // If no more active, disable the IRQ
+         auto pioNum = pio_get_index(_rxPIO);
+         bool used = false;
+@@ -280,6 +320,16 @@ void SerialPIO::end() {
+             auto irqno = pio_irq_0(_rxPIO);
+             irq_set_enabled(irqno, false);
+         }
++        _rxPIO = nullptr;
++    }
++    if ((_rx != NOPIN) && !_rxClaimed) {
++        gpio_set_inover(_rx, 0);
++    }
++
++    if (_tx != NOPIN) {
++        gpio_set_outover(_tx, 0);
++    }
++    if (_rx != NOPIN) {
+         gpio_set_inover(_rx, 0);
+     }
+     _running = false;
+@@ -356,14 +406,16 @@ size_t SerialPIO::write(uint8_t c) {
+         return 0;
+     }
+ 
+-    uint32_t val = c;
++    uint32_t dataMask = (1u << _bits) - 1u;
++    uint32_t dataOnly = c & dataMask;
++    uint32_t val = dataOnly;
+     if (_parity == UART_PARITY_NONE) {
+         val |= 7 << _bits; // Set 2 stop bits, the HW will only transmit the required number
+     } else if (_parity == UART_PARITY_EVEN) {
+-        val |= ::_parity(c) << _bits;
++        val |= ::_parity(dataOnly) << _bits;
+         val |= 7 << (_bits + 1);
+     } else {
+-        val |= (1 ^ ::_parity(c)) << _bits;
++        val |= (1 ^ ::_parity(dataOnly)) << _bits;
+         val |= 7 << (_bits + 1);
+     }
+     val <<= 1;  // Start bit = low
+diff --git a/cores/rp2040/SerialPIO.h b/cores/rp2040/SerialPIO.h
+index f105843..0341a35 100644
+--- a/cores/rp2040/SerialPIO.h
++++ b/cores/rp2040/SerialPIO.h
+@@ -81,15 +81,19 @@ protected:
+     bool _invertTX;
+     bool _invertRX;
+ 
+-    PIOProgram *_txPgm;
+-    PIO _txPIO;
+-    int _txSM;
++    PIOProgram *_txPgm = nullptr;
++    PIO _txPIO = nullptr;
++    int _txSM = -1;
+     int _txBits;
++    bool _txClaimed = false;
++    bool _txEnabled = false;
+ 
+-    PIOProgram *_rxPgm;
+-    PIO _rxPIO;
+-    int _rxSM;
++    PIOProgram *_rxPgm = nullptr;
++    PIO _rxPIO = nullptr;
++    int _rxSM = -1;
+     int _rxBits;
++    bool _rxClaimed = false;
++    bool _rxEnabled = false;
+ 
+     LocklessQueue<uint8_t> *_queue;
+     size_t   _fifoSize;
