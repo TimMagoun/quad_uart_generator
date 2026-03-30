@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import re
 import secrets
 import shutil
@@ -339,10 +340,35 @@ def close_serial_ports(serials: Iterable) -> None:
             pass
 
 
+def generate_default_configs() -> str:
+    """Generate default serial configuration permutations."""
+    baudrates = reversed([5400, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600])
+    data_bits = [7, 8]
+    parities = ['N', 'E', 'O']
+    stop_bits = [1, 2]
+    
+    configs = []
+    for baud in baudrates:
+        for db in data_bits:
+            for parity in parities:
+                for sb in stop_bits:
+                    # Skip invalid combinations: 7-bit data with 2 stop bits
+                    if db == 7 and sb == 2:
+                        continue
+                    configs.append(f"{baud}-{db}{parity}{sb}")
+    
+    return ','.join(configs)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Validate UART self-loopback on all bridge ports.")
     p.add_argument("--project-dir", default=".", help="Project directory (default: .)")
     p.add_argument("--flash", action="store_true", help="Flash firmware before loopback test.")
+    p.add_argument(
+        "--upload-port",
+        default=None,
+        help="Optional upload port passed to PlatformIO (for example /dev/ttyACM0).",
+    )
     p.add_argument(
         "--ports",
         default=None,
@@ -352,7 +378,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--pid", type=lambda x: int(x, 0), default=None, help="USB PID filter.")
     p.add_argument("--baudrate", type=int, default=115200, help="Initial open baudrate.")
     p.add_argument("--rounds", type=int, default=2)
-    p.add_argument("--payload-size", type=int, default=28)
+    p.add_argument("--payload-size", type=int, default=300)
     p.add_argument("--timeout", type=float, default=1.5, help="Per-port read timeout seconds.")
     p.add_argument("--attempts", type=int, default=3, help="Retries per port per round.")
     p.add_argument(
@@ -364,7 +390,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-ports", type=int, default=6)
     p.add_argument(
         "--configs",
-        default="9600-8N1,57600-7E1,115200-8O1,230400-8N2",
+        default=generate_default_configs(),
         help="Comma-separated serial configs in BAUD-DPS format.",
     )
     p.add_argument(
@@ -393,7 +419,10 @@ def validate_uart(args) -> int:
 
     if args.flash:
         logger.always("Flashing firmware before test...")
-        rc = run_command(["pio", "run", "-t", "upload"], cwd=project_dir, logger=logger)
+        command = ["pio", "run", "-t", "upload"]
+        if args.upload_port:
+            command.extend(["--upload-port", args.upload_port])
+        rc = run_command(command, cwd=project_dir, logger=logger)
         if rc != 0:
             logger.always(f"Flash failed with code {rc}")
             return rc
