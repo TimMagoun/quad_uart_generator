@@ -48,13 +48,13 @@ void test_port_show_includes_seq_and_enable_flag(void) {
     QuadUartController c(&writer);
 
     const char* r = c.handle_command("PORT 0 SHOW");
-    TEST_ASSERT_TRUE(contains(r, "PORT=0"));
-    TEST_ASSERT_TRUE(contains(r, "BAUD="));
-    TEST_ASSERT_TRUE(contains(r, "FORMAT="));
-    TEST_ASSERT_TRUE(contains(r, "LEN="));
-    TEST_ASSERT_TRUE(contains(r, "PPS="));
-    TEST_ASSERT_TRUE(contains(r, "EN="));
-    TEST_ASSERT_TRUE(contains(r, "SEQ="));
+    TEST_ASSERT_TRUE(contains(r, "PORT 0"));
+    TEST_ASSERT_TRUE(contains(r, "BAUD:"));
+    TEST_ASSERT_TRUE(contains(r, "FORMAT:"));
+    TEST_ASSERT_TRUE(contains(r, "LEN:"));
+    TEST_ASSERT_TRUE(contains(r, "PPS:"));
+    TEST_ASSERT_TRUE(contains(r, "EN:"));
+    TEST_ASSERT_TRUE(contains(r, "SEQ:"));
 }
 
 void test_cfg_rejects_overflow_numeric_value(void) {
@@ -75,6 +75,51 @@ void test_rejects_overlong_command_line(void) {
     TEST_ASSERT_EQUAL_STRING("ERR BAD_CMD line-too-long", r);
 }
 
+void test_multi_port_cfg_updates_each_target(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+
+    const char* r = c.handle_command("PORT 1,2,3 CFG BAUD 921600");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+
+    r = c.handle_command("PORT 1 SHOW");
+    TEST_ASSERT_TRUE(contains(r, "BAUD: 921600"));
+    r = c.handle_command("PORT 2 SHOW");
+    TEST_ASSERT_TRUE(contains(r, "BAUD: 921600"));
+    r = c.handle_command("PORT 3 SHOW");
+    TEST_ASSERT_TRUE(contains(r, "BAUD: 921600"));
+}
+
+void test_multi_port_cfg_is_atomic_on_validation_error(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+
+    const char* r = c.handle_command("PORT 1 CFG FORMAT 8E2");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 1 CFG BAUD 9600");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 1 CFG PPS 1");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 1 CFG LEN 128");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+
+    r = c.handle_command("PORT 1,2 CFG PPS 7");
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_VALUE cfg", r);
+
+    r = c.handle_command("PORT 1 SHOW");
+    TEST_ASSERT_TRUE(contains(r, "PPS: 1"));
+    r = c.handle_command("PORT 2 SHOW");
+    TEST_ASSERT_TRUE(contains(r, "PPS: 10"));
+}
+
+void test_multi_port_bad_selector_rejected(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+
+    const char* r = c.handle_command("PORT 1,,2 SHOW");
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_PORT value", r);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_parse_format_8e2);
@@ -83,5 +128,8 @@ int main() {
     RUN_TEST(test_port_show_includes_seq_and_enable_flag);
     RUN_TEST(test_cfg_rejects_overflow_numeric_value);
     RUN_TEST(test_rejects_overlong_command_line);
+    RUN_TEST(test_multi_port_cfg_updates_each_target);
+    RUN_TEST(test_multi_port_cfg_is_atomic_on_validation_error);
+    RUN_TEST(test_multi_port_bad_selector_rejected);
     return UNITY_END();
 }

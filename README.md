@@ -63,16 +63,17 @@ PORT 0 DISABLE
 - `STATUS`
 - `ALL ENABLE`
 - `ALL DISABLE`
-- `PORT <id> SHOW`
-- `PORT <id> ENABLE`
-- `PORT <id> DISABLE`
-- `PORT <id> CFG BAUD <value>`
-- `PORT <id> CFG FORMAT <value>` where format is `<data><parity><stop>` (for example `8N1`, `7E1`, `8O2`)
-- `PORT <id> CFG LEN <value>`
-- `PORT <id> CFG PPS <value>`
+- `PORT <id[,id...]> SHOW`
+- `PORT <id[,id...]> ENABLE`
+- `PORT <id[,id...]> DISABLE`
+- `PORT <id[,id...]> CFG BAUD <value>`
+- `PORT <id[,id...]> CFG FORMAT <value>` where format is `<data><parity><stop>` (for example `8N1`, `7E1`, `8O2`)
+- `PORT <id[,id...]> CFG LEN <value>`
+- `PORT <id[,id...]> CFG PPS <value>`
 
 Port ID range:
 - `0..3`
+- List syntax example: `PORT 1,2,3 CFG BAUD 921600`
 
 Configuration rules:
 - Any `CFG` command is rejected while any port is enabled: `ERR BUSY outputs-enabled`

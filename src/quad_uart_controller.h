@@ -65,6 +65,7 @@ private:
     const char* enable_port(uint8_t port_id, uint32_t now_us);
     const char* disable_port(uint8_t port_id);
     const char* port_show(uint8_t port_id);
+    const char* set_ports_show(const uint8_t* port_ids, size_t port_count);
     const char* set_error(const char* msg);
     const char* set_port_show(uint8_t port_id);
     const char* set_status_all();

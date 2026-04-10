@@ -18,17 +18,75 @@ constexpr const char kHelpText[] =
     "  STATUS\n"
     "  ALL ENABLE\n"
     "  ALL DISABLE\n"
-    "  PORT <id> SHOW\n"
-    "  PORT <id> ENABLE\n"
-    "  PORT <id> DISABLE\n"
-    "  PORT <id> CFG BAUD <1..921600>\n"
-    "  PORT <id> CFG FORMAT <5N1..8O2>\n"
-    "  PORT <id> CFG LEN <10..128>\n"
-    "  PORT <id> CFG PPS <1..1000>\n"
+    "  PORT <id[,id...]> SHOW\n"
+    "  PORT <id[,id...]> ENABLE\n"
+    "  PORT <id[,id...]> DISABLE\n"
+    "  PORT <id[,id...]> CFG BAUD <1..921600>\n"
+    "  PORT <id[,id...]> CFG FORMAT <5N1..8O2>\n"
+    "  PORT <id[,id...]> CFG LEN <10..128>\n"
+    "  PORT <id[,id...]> CFG PPS <1..1000>\n"
     "Notes:\n"
     "  - Port id range: 0..3\n"
+    "  - Comma-separated lists are supported (example: PORT 1,2,3 CFG BAUD 921600)\n"
     "  - Disable all outputs before any CFG change\n"
     "  - FORMAT examples: 8N1 7E1 8O2";
+
+enum class PortListParseResult : uint8_t { Ok, BadValue, BadRange };
+
+PortListParseResult parse_port_list(const char* token, uint8_t out_ids[kPortCount], size_t* out_count) {
+    if (token == nullptr || out_ids == nullptr || out_count == nullptr) {
+        return PortListParseResult::BadValue;
+    }
+
+    bool seen[kPortCount] = {false, false, false, false};
+    size_t count = 0;
+    const char* p = token;
+    while (*p != '\0') {
+        if (*p < '0' || *p > '9') {
+            return PortListParseResult::BadValue;
+        }
+
+        uint32_t v = 0;
+        while (*p >= '0' && *p <= '9') {
+            const uint32_t digit = static_cast<uint32_t>(*p - '0');
+            if (v > (std::numeric_limits<uint32_t>::max() - digit) / 10U) {
+                return PortListParseResult::BadValue;
+            }
+            v = v * 10U + digit;
+            p++;
+        }
+
+        if (v > 255U) {
+            return PortListParseResult::BadValue;
+        }
+        if (v >= kPortCount) {
+            return PortListParseResult::BadRange;
+        }
+
+        const uint8_t id = static_cast<uint8_t>(v);
+        if (!seen[id]) {
+            seen[id] = true;
+            out_ids[count++] = id;
+        }
+
+        if (*p == '\0') {
+            break;
+        }
+        if (*p != ',') {
+            return PortListParseResult::BadValue;
+        }
+        p++;
+        if (*p == '\0') {
+            return PortListParseResult::BadValue;
+        }
+    }
+
+    if (count == 0) {
+        return PortListParseResult::BadValue;
+    }
+    *out_count = count;
+    return PortListParseResult::Ok;
+}
 
 bool parse_u32(const char* s, uint32_t* out) {
     if (out == nullptr || s == nullptr || s[0] == '\0') {
@@ -290,6 +348,45 @@ const char* QuadUartController::port_show(uint8_t port_id) {
     return set_port_show(port_id);
 }
 
+const char* QuadUartController::set_ports_show(const uint8_t* port_ids, size_t port_count) {
+    if (port_ids == nullptr || port_count == 0) {
+        return set_error("ERR BAD_PORT value");
+    }
+
+    resp_buf_[0] = '\0';
+    size_t used = 0;
+    for (size_t idx = 0; idx < port_count; idx++) {
+        const uint8_t id = port_ids[idx];
+        const PortConfig& cfg = configs_[id];
+        const PortRuntime& rt = runtimes_[id];
+        const char* sep = (idx > 0) ? "\n\n" : "";
+        const int n = snprintf(
+            resp_buf_ + used,
+            sizeof(resp_buf_) - used,
+            "%sPORT: %ucf BAUD: %lu FORMAT: %u%c%u LEN: %u PPS: %u EN: %u SEQ: %lu",
+            sep,
+            static_cast<unsigned>(id),
+            static_cast<unsigned long>(cfg.baud),
+            static_cast<unsigned>(cfg.data_bits),
+            parity_char(cfg.parity),
+            static_cast<unsigned>(cfg.stop_bits),
+            static_cast<unsigned>(cfg.payload_len),
+            static_cast<unsigned>(cfg.pps),
+            rt.enabled ? 1U : 0U,
+            static_cast<unsigned long>(rt.seq));
+        if (n < 0) {
+            return set_error("ERR INTERNAL fmt");
+        }
+        if (static_cast<size_t>(n) >= (sizeof(resp_buf_) - used)) {
+            used = sizeof(resp_buf_) - 1;
+            resp_buf_[used] = '\0';
+            break;
+        }
+        used += static_cast<size_t>(n);
+    }
+    return resp_buf_;
+}
+
 // cppcheck-suppress unusedFunction
 const char* QuadUartController::handle_command(const char* line, uint32_t now_us) {
     if (line == nullptr) {
@@ -364,12 +461,13 @@ const char* QuadUartController::handle_command(const char* line, uint32_t now_us
         return set_error("ERR BAD_CMD syntax");
     }
 
-    uint32_t port_u32 = 0;
-    if (parse_u32(tokens[1], &port_u32) == false || port_u32 > 255U) {
+    uint8_t port_ids[kPortCount] = {0, 0, 0, 0};
+    size_t port_count = 0;
+    const PortListParseResult port_parse_result = parse_port_list(tokens[1], port_ids, &port_count);
+    if (port_parse_result == PortListParseResult::BadValue) {
         return set_error("ERR BAD_PORT value");
     }
-    const uint8_t port_id = static_cast<uint8_t>(port_u32);
-    if (valid_port(port_id) == false) {
+    if (port_parse_result == PortListParseResult::BadRange) {
         return set_error("ERR BAD_PORT range");
     }
 
@@ -377,21 +475,30 @@ const char* QuadUartController::handle_command(const char* line, uint32_t now_us
         if (token_count != 3) {
             return set_error("ERR BAD_CMD show-args");
         }
-        return port_show(port_id);
+        return set_ports_show(port_ids, port_count);
     }
 
     if (strcmp(tokens[2], "ENABLE") == 0) {
         if (token_count != 3) {
             return set_error("ERR BAD_CMD enable-args");
         }
-        return set_error(enable_port(port_id, now_us));
+        for (size_t i = 0; i < port_count; i++) {
+            const char* r = enable_port(port_ids[i], now_us);
+            if (strcmp(r, "OK") != 0) {
+                return set_error(r);
+            }
+        }
+        return set_error("OK");
     }
 
     if (strcmp(tokens[2], "DISABLE") == 0) {
         if (token_count != 3) {
             return set_error("ERR BAD_CMD disable-args");
         }
-        return set_error(disable_port(port_id));
+        for (size_t i = 0; i < port_count; i++) {
+            disable_port(port_ids[i]);
+        }
+        return set_error("OK");
     }
 
     if (strcmp(tokens[2], "CFG") != 0 || token_count != 5) {
@@ -402,49 +509,71 @@ const char* QuadUartController::handle_command(const char* line, uint32_t now_us
         return set_error("ERR BUSY outputs-enabled");
     }
 
-    PortConfig trial = configs_[port_id];
+    enum class CfgKey : uint8_t { Baud, Format, Len, Pps };
+    CfgKey key{};
+    uint32_t value_u32 = 0;
+    ParsedFormat pf{};
 
     if (strcmp(tokens[3], "BAUD") == 0) {
-        uint32_t v = 0;
-        if (parse_u32(tokens[4], &v) == false) {
+        if (parse_u32(tokens[4], &value_u32) == false) {
             return set_error("ERR BAD_VALUE baud");
         }
-        trial.baud = v;
+        key = CfgKey::Baud;
     } else if (strcmp(tokens[3], "FORMAT") == 0) {
-        ParsedFormat pf{};
         if (parse_format_token(tokens[4], &pf) == false) {
             return set_error("ERR BAD_VALUE format");
         }
-        trial.data_bits = pf.data_bits;
-        trial.stop_bits = pf.stop_bits;
-        if (pf.parity == 'E') {
-            trial.parity = ParityMode::Even;
-        } else if (pf.parity == 'O') {
-            trial.parity = ParityMode::Odd;
-        } else {
-            trial.parity = ParityMode::None;
-        }
+        key = CfgKey::Format;
     } else if (strcmp(tokens[3], "LEN") == 0) {
-        uint32_t v = 0;
-        if (parse_u32(tokens[4], &v) == false || v > 255U) {
+        if (parse_u32(tokens[4], &value_u32) == false || value_u32 > 255U) {
             return set_error("ERR BAD_VALUE len");
         }
-        trial.payload_len = static_cast<uint8_t>(v);
+        key = CfgKey::Len;
     } else if (strcmp(tokens[3], "PPS") == 0) {
-        uint32_t v = 0;
-        if (parse_u32(tokens[4], &v) == false || v > 65535U) {
+        if (parse_u32(tokens[4], &value_u32) == false || value_u32 > 65535U) {
             return set_error("ERR BAD_VALUE pps");
         }
-        trial.pps = static_cast<uint16_t>(v);
+        key = CfgKey::Pps;
     } else {
         return set_error("ERR BAD_CMD cfg-key");
     }
 
-    if (validate_config(trial) == false) {
-        return set_error("ERR BAD_VALUE cfg");
+    PortConfig trials[kPortCount]{};
+    bool target[kPortCount] = {false, false, false, false};
+    for (size_t i = 0; i < port_count; i++) {
+        const uint8_t port_id = port_ids[i];
+        PortConfig trial = configs_[port_id];
+
+        if (key == CfgKey::Baud) {
+            trial.baud = value_u32;
+        } else if (key == CfgKey::Format) {
+            trial.data_bits = pf.data_bits;
+            trial.stop_bits = pf.stop_bits;
+            if (pf.parity == 'E') {
+                trial.parity = ParityMode::Even;
+            } else if (pf.parity == 'O') {
+                trial.parity = ParityMode::Odd;
+            } else {
+                trial.parity = ParityMode::None;
+            }
+        } else if (key == CfgKey::Len) {
+            trial.payload_len = static_cast<uint8_t>(value_u32);
+        } else {
+            trial.pps = static_cast<uint16_t>(value_u32);
+        }
+
+        if (validate_config(trial) == false) {
+            return set_error("ERR BAD_VALUE cfg");
+        }
+        trials[port_id] = trial;
+        target[port_id] = true;
     }
 
-    configs_[port_id] = trial;
+    for (uint8_t id = 0; id < kPortCount; id++) {
+        if (target[id]) {
+            configs_[id] = trials[id];
+        }
+    }
     return set_error("OK");
 }
 
