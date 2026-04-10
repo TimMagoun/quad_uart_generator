@@ -58,6 +58,10 @@ Each generated payload must include:
 
 ## Architecture
 
+### UART Implementation Choice
+- Use RP2040 PIO UART transmit paths (`SerialPIO`/PIO-backed TX) for all 4 output ports.
+- Rationale: RP2040 has only 2 hardware UART peripherals; 4 independent ports require PIO-backed UART TX.
+
 ### Control Plane
 - USB CDC serial endpoint accepts newline-delimited ASCII commands.
 - Lightweight parser converts commands to operations on per-port config/state.
@@ -68,12 +72,21 @@ Each generated payload must include:
   - `baud`, `data_bits`, `parity`, `stop_bits`, `len`, `pps`
 - Per-port runtime state:
   - `enabled`, `seq`, `next_deadline_us`
+  - `tx_packet_buf[128]`, `tx_packet_len`, `tx_write_index`, `tx_in_progress`
 - Scheduler loop checks all 4 ports and emits packets when per-port deadlines are reached.
+- TX servicing is non-blocking: each scheduler pass writes only while UART has room, then yields.
 
 ### Timing Model
 - Packet period computed per port from `pps`.
 - `next_deadline_us` advanced by period for deterministic periodic behavior.
 - Catch-up policy (if delayed): transmit once and rebase to now + period (KISS, avoids burst storms).
+
+### Throughput Guardrail (Dynamic Rate Cap)
+- Requested `pps` is validated against per-port maximum throughput:
+  - `max_pps = floor(baud / (bits_per_char * len))`
+  - `bits_per_char = 1(start) + data_bits + parity_bits(0 or 1) + stop_bits`
+- If requested `pps > max_pps`, command is rejected with `ERR BAD_VALUE`.
+- This prevents oversubscription and prevents scheduler stalls at low baud/high payload settings (e.g., 9600 baud).
 
 ## Host ASCII Command Interface
 
@@ -126,10 +139,17 @@ DATA fill pattern:
 - For each data byte index `i` in `DATA`: `(port_id ^ (seq & 0xFF) ^ i) & 0xFF`
 - Deterministic and cheap to compute for debugging and integrity checks.
 
+### Sequential Transmission Rule
+- Per port, packets are strictly in-order and non-overlapping.
+- `SEQ` increments only after the full current packet has been queued for TX.
+- A new packet is not started for a port while `tx_in_progress` is true.
+- This guarantees sequential packet emission even under non-blocking partial-write scheduling.
+
 ## Error Handling
 - Invalid syntax or unknown tokens: `ERR BAD_CMD`
 - Invalid port index: `ERR BAD_PORT`
 - Value out of range / malformed format: `ERR BAD_VALUE`
+  - Includes `pps` above dynamic throughput cap for current baud/format/len
 - Unsupported serial mode by backend implementation: `ERR UNSUPPORTED`
 - Config mutation while enabled: `ERR BUSY`
 
@@ -146,6 +166,9 @@ DATA fill pattern:
 - Configure all 4 ports differently and verify concurrent transmit
 - Validate effective baud/format combinations on external analyzer/receiver
 - Verify packet rate control for representative values (1, 10, 100, 1000 pps)
+- Verify dynamic cap enforcement using low-baud/high-len cases (e.g., 9600 baud, len 128)
+- Verify non-blocking scheduler behavior under saturated throughput (no control-plane starvation)
+- Verify strict per-port sequence ordering with no skipped/interleaved packet starts
 - Confirm `ERR BUSY` rule while any output is enabled
 
 ## Open Choices Finalized
@@ -154,6 +177,7 @@ DATA fill pattern:
 - Packet rate model: fixed packets/sec
 - Checksum: CRC-16
 - Design principle: KISS
+- UART expansion mechanism: 4x PIO TX UART
 
 ## Risks and Mitigations
 - High combined throughput can stress software UART timing.
