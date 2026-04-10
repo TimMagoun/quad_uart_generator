@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stddef.h>
 
+// cppcheck-suppress unusedFunction
 bool parse_format_token(const char* token, ParsedFormat* out) {
     if (token == nullptr || out == nullptr) {
         return false;

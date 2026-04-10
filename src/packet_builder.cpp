@@ -15,6 +15,7 @@ uint16_t crc16_ccitt_false(const uint8_t* data, size_t len) {
     return crc;
 }
 
+// cppcheck-suppress unusedFunction
 size_t build_packet(uint8_t port_id, uint32_t seq, uint8_t payload_len, uint8_t* out, size_t out_cap) {
     if (!out || payload_len < 10 || payload_len > 128 || out_cap < payload_len) {
         return 0;

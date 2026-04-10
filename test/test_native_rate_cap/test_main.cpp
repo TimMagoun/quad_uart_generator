@@ -1,7 +1,6 @@
 #include <unity.h>
 
 #include <array>
-#include <string>
 #include <vector>
 
 #include "quad_uart_controller.h"
@@ -54,35 +53,50 @@ void test_compute_max_pps_9600_8e2_128(void) {
 void test_cfg_pps_rejected_above_dynamic_cap(void) {
     FakeWriter writer;
     QuadUartController c(&writer);
-    std::string r;
+    const char* r = nullptr;
 
     r = c.handle_command("PORT 0 CFG PPS 1");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
     r = c.handle_command("PORT 0 CFG BAUD 9600");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
     r = c.handle_command("PORT 0 CFG FORMAT 8E2");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
     r = c.handle_command("PORT 0 CFG LEN 128");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
 
     r = c.handle_command("PORT 0 CFG PPS 7");
-    TEST_ASSERT_EQUAL_STRING("ERR BAD_VALUE cfg", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_VALUE cfg", r);
 
     r = c.handle_command("PORT 0 CFG PPS 6");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+}
+
+void test_cfg_rejects_pps_above_hard_cap(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+    const char* r = nullptr;
+
+    r = c.handle_command("PORT 0 CFG BAUD 921600");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 0 CFG FORMAT 8N1");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 0 CFG LEN 10");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 0 CFG PPS 1001");
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_VALUE cfg", r);
 }
 
 void test_seq_advances_only_after_packet_complete(void) {
     FakeWriter writer;
     QuadUartController c(&writer);
-    std::string r;
+    const char* r = nullptr;
 
     r = c.handle_command("PORT 0 CFG LEN 10");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
     r = c.handle_command("PORT 0 CFG PPS 1");
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
     r = c.handle_command("PORT 0 ENABLE", 1000000);
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    TEST_ASSERT_EQUAL_STRING("OK", r);
 
     writer.set_credits(0, 4);
     c.service_tx_nonblocking(1000000);
@@ -95,10 +109,37 @@ void test_seq_advances_only_after_packet_complete(void) {
     TEST_ASSERT_EQUAL_UINT8(0, c.runtime(0).tx_in_progress ? 1 : 0);
 }
 
+void test_scheduler_handles_micros_wraparound(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+    const char* r = nullptr;
+
+    r = c.handle_command("PORT 0 CFG LEN 10");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 0 CFG PPS 1");
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+    r = c.handle_command("PORT 0 ENABLE", 0xFFFFFF00U);
+    TEST_ASSERT_EQUAL_STRING("OK", r);
+
+    writer.set_credits(0, 10);
+    c.service_tx_nonblocking(0xFFFFFF00U);
+    TEST_ASSERT_EQUAL_UINT32(1, c.runtime(0).seq);
+
+    writer.set_credits(0, 20);
+    c.service_tx_nonblocking(1000U);
+    TEST_ASSERT_EQUAL_UINT32(1, c.runtime(0).seq);
+
+    writer.set_credits(0, 20);
+    c.service_tx_nonblocking(1000000U);
+    TEST_ASSERT_EQUAL_UINT32(2, c.runtime(0).seq);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_compute_max_pps_9600_8e2_128);
     RUN_TEST(test_cfg_pps_rejected_above_dynamic_cap);
+    RUN_TEST(test_cfg_rejects_pps_above_hard_cap);
     RUN_TEST(test_seq_advances_only_after_packet_complete);
+    RUN_TEST(test_scheduler_handles_micros_wraparound);
     return UNITY_END();
 }

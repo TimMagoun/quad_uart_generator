@@ -1,5 +1,6 @@
 #include <unity.h>
 
+#include <cstring>
 #include <string>
 
 #include "command_parser.h"
@@ -12,8 +13,8 @@ public:
     size_t write_byte(uint8_t, uint8_t) override { return 0; }
 };
 
-bool contains(const std::string& haystack, const std::string& needle) {
-    return haystack.find(needle) < haystack.size();
+bool contains(const char* haystack, const char* needle) {
+    return std::strstr(haystack, needle) != nullptr;
 }
 
 void test_parse_format_8e2(void) {
@@ -35,8 +36,8 @@ void test_cfg_rejected_when_any_port_enabled(void) {
     FakeWriter writer;
     QuadUartController c(&writer);
 
-    std::string r = c.handle_command("PORT 0 ENABLE", 0);
-    TEST_ASSERT_EQUAL_STRING("OK", r.c_str());
+    const char* r = c.handle_command("PORT 0 ENABLE", 0);
+    TEST_ASSERT_EQUAL_STRING("OK", r);
 
     r = c.handle_command("PORT 1 CFG BAUD 9600");
     TEST_ASSERT_TRUE(contains(r, "ERR BUSY"));
@@ -46,7 +47,7 @@ void test_port_show_includes_seq_and_enable_flag(void) {
     FakeWriter writer;
     QuadUartController c(&writer);
 
-    const std::string r = c.handle_command("PORT 0 SHOW");
+    const char* r = c.handle_command("PORT 0 SHOW");
     TEST_ASSERT_TRUE(contains(r, "PORT=0"));
     TEST_ASSERT_TRUE(contains(r, "BAUD="));
     TEST_ASSERT_TRUE(contains(r, "FORMAT="));
@@ -56,11 +57,31 @@ void test_port_show_includes_seq_and_enable_flag(void) {
     TEST_ASSERT_TRUE(contains(r, "SEQ="));
 }
 
+void test_cfg_rejects_overflow_numeric_value(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+    const char* r = c.handle_command("PORT 0 CFG BAUD 999999999999999999999");
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_VALUE baud", r);
+}
+
+void test_rejects_overlong_command_line(void) {
+    FakeWriter writer;
+    QuadUartController c(&writer);
+    std::string long_cmd = "PORT 0 SHOW";
+    while (long_cmd.size() < 300) {
+        long_cmd += " X";
+    }
+    const char* r = c.handle_command(long_cmd.c_str());
+    TEST_ASSERT_EQUAL_STRING("ERR BAD_CMD line-too-long", r);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_parse_format_8e2);
     RUN_TEST(test_parse_format_reject_invalid);
     RUN_TEST(test_cfg_rejected_when_any_port_enabled);
     RUN_TEST(test_port_show_includes_seq_and_enable_flag);
+    RUN_TEST(test_cfg_rejects_overflow_numeric_value);
+    RUN_TEST(test_rejects_overlong_command_line);
     return UNITY_END();
 }

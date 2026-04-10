@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 
-#include <string>
-
 #include "quad_uart_controller.h"
 
 namespace {
@@ -53,6 +51,7 @@ public:
           uart3_(NOPIN, 5) {
     }
 
+    // cppcheck-suppress unusedFunction
     bool begin_port(uint8_t port_id, const PortConfig& config) override {
         SoftwareSerial* uart = serial_for(port_id);
         if (uart == nullptr) {
@@ -62,6 +61,7 @@ public:
         return true;
     }
 
+    // cppcheck-suppress unusedFunction
     int available_for_write(uint8_t port_id) override {
         SoftwareSerial* uart = serial_for(port_id);
         if (uart == nullptr) {
@@ -70,6 +70,7 @@ public:
         return uart->availableForWrite();
     }
 
+    // cppcheck-suppress unusedFunction
     size_t write_byte(uint8_t port_id, uint8_t byte) override {
         SoftwareSerial* uart = serial_for(port_id);
         if (uart == nullptr) {
@@ -103,7 +104,10 @@ private:
 
 PioUartWriter g_writer;
 QuadUartController g_controller(&g_writer);
-String g_line;
+constexpr size_t kLineMax = 255;
+char g_line[kLineMax + 1] = {0};
+size_t g_line_len = 0;
+bool g_line_overflow = false;
 
 void handle_control_serial() {
     while (Serial.available() > 0) {
@@ -112,26 +116,33 @@ void handle_control_serial() {
             continue;
         }
         if (c == '\n') {
-            if (g_line.length() > 0) {
-                const std::string cmd(g_line.c_str());
-                const std::string resp = g_controller.handle_command(cmd, micros());
-                Serial.println(resp.c_str());
-                g_line = "";
+            if (g_line_overflow) {
+                Serial.println("ERR BAD_CMD line-too-long");
+            } else if (g_line_len > 0) {
+                g_line[g_line_len] = '\0';
+                const char* resp = g_controller.handle_command(g_line, micros());
+                Serial.println(resp);
             }
+            g_line_len = 0;
+            g_line_overflow = false;
             continue;
         }
-        if (g_line.length() < 255) {
-            g_line += c;
+        if (g_line_len < kLineMax) {
+            g_line[g_line_len++] = c;
+        } else {
+            g_line_overflow = true;
         }
     }
 }
 
 }  // namespace
 
+// cppcheck-suppress unusedFunction
 void setup() {
     Serial.begin(115200);
 }
 
+// cppcheck-suppress unusedFunction
 void loop() {
     handle_control_serial();
     g_controller.service_tx_nonblocking(micros());

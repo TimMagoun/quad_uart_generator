@@ -3,51 +3,33 @@
 #include "command_parser.h"
 #include "packet_builder.h"
 
-#include <algorithm>
 #include <cctype>
-#include <sstream>
-#include <vector>
+#include <cstdio>
+#include <cstring>
+#include <limits>
 
 namespace {
 constexpr uint16_t kMinPps = 1;
 constexpr uint16_t kMaxPps = 1000;
 
-std::string trim_copy(const std::string& in) {
-    size_t start = 0;
-    while (start < in.size() && std::isspace(static_cast<unsigned char>(in[start])) != 0) {
-        start++;
-    }
-    size_t end = in.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(in[end - 1])) != 0) {
-        end--;
-    }
-    return in.substr(start, end - start);
-}
-
-std::vector<std::string> split_ws_upper(const std::string& in) {
-    std::istringstream iss(in);
-    std::vector<std::string> tokens;
-    std::string tok;
-    while (iss >> tok) {
-        std::transform(tok.begin(), tok.end(), tok.begin(), [](unsigned char c) {
-            return static_cast<char>(std::toupper(c));
-        });
-        tokens.push_back(tok);
-    }
-    return tokens;
-}
-
-bool parse_u32(const std::string& s, uint32_t* out) {
-    if (out == nullptr || s.empty()) {
+bool parse_u32(const char* s, uint32_t* out) {
+    if (out == nullptr || s == nullptr || s[0] == '\0') {
         return false;
     }
+
     uint32_t v = 0;
-    for (char c : s) {
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        const char c = s[i];
         if (c < '0' || c > '9') {
             return false;
         }
-        v = v * 10 + static_cast<uint32_t>(c - '0');
+        const uint32_t digit = static_cast<uint32_t>(c - '0');
+        if (v > (std::numeric_limits<uint32_t>::max() - digit) / 10U) {
+            return false;
+        }
+        v = v * 10U + digit;
     }
+
     *out = v;
     return true;
 }
@@ -60,6 +42,18 @@ char parity_char(ParityMode p) {
         return 'O';
     }
     return 'N';
+}
+
+bool time_reached(uint32_t now_us, uint32_t deadline_us) {
+    return static_cast<int32_t>(now_us - deadline_us) >= 0;
+}
+
+size_t bounded_strlen(const char* s, size_t max_len_plus_one) {
+    size_t n = 0;
+    while (n < max_len_plus_one && s[n] != '\0') {
+        n++;
+    }
+    return n;
 }
 }  // namespace
 
@@ -96,12 +90,16 @@ QuadUartController::QuadUartController(UartTxWriter* writer) : writer_(writer) {
         }
         runtimes_[i] = rt;
     }
+
+    resp_buf_[0] = '\0';
 }
 
+// cppcheck-suppress unusedFunction
 const PortConfig& QuadUartController::config(uint8_t port_id) const {
     return configs_[port_id];
 }
 
+// cppcheck-suppress unusedFunction
 const PortRuntime& QuadUartController::runtime(uint8_t port_id) const {
     return runtimes_[port_id];
 }
@@ -147,18 +145,105 @@ bool QuadUartController::validate_config(const PortConfig& cfg) const {
     return true;
 }
 
-std::string QuadUartController::port_show(uint8_t port_id) const {
-    const PortConfig& cfg = configs_[port_id];
-    const PortRuntime& rt = runtimes_[port_id];
-    std::ostringstream oss;
-    oss << "PORT=" << static_cast<int>(port_id) << " BAUD=" << cfg.baud << " FORMAT="
-        << static_cast<int>(cfg.data_bits) << parity_char(cfg.parity) << static_cast<int>(cfg.stop_bits)
-        << " LEN=" << static_cast<int>(cfg.payload_len) << " PPS=" << cfg.pps
-        << " EN=" << static_cast<int>(rt.enabled ? 1 : 0) << " SEQ=" << rt.seq;
-    return oss.str();
+const char* QuadUartController::set_error(const char* msg) {
+    if (msg == nullptr) {
+        resp_buf_[0] = '\0';
+        return resp_buf_;
+    }
+    const int n = snprintf(resp_buf_, sizeof(resp_buf_), "%s", msg);
+    if (n < 0) {
+        resp_buf_[0] = '\0';
+    }
+    return resp_buf_;
 }
 
-std::string QuadUartController::enable_port(uint8_t port_id, uint32_t now_us) {
+const char* QuadUartController::set_port_show(uint8_t port_id) {
+    const PortConfig& cfg = configs_[port_id];
+    const PortRuntime& rt = runtimes_[port_id];
+    const int n = snprintf(
+        resp_buf_,
+        sizeof(resp_buf_),
+        "PORT=%u BAUD=%lu FORMAT=%u%c%u LEN=%u PPS=%u EN=%u SEQ=%lu",
+        static_cast<unsigned>(port_id),
+        static_cast<unsigned long>(cfg.baud),
+        static_cast<unsigned>(cfg.data_bits),
+        parity_char(cfg.parity),
+        static_cast<unsigned>(cfg.stop_bits),
+        static_cast<unsigned>(cfg.payload_len),
+        static_cast<unsigned>(cfg.pps),
+        rt.enabled ? 1U : 0U,
+        static_cast<unsigned long>(rt.seq));
+    if (n < 0) {
+        return set_error("ERR INTERNAL fmt");
+    }
+    return resp_buf_;
+}
+
+const char* QuadUartController::set_status_all() {
+    resp_buf_[0] = '\0';
+    size_t used = 0;
+    for (uint8_t i = 0; i < kPortCount; i++) {
+        const PortConfig& cfg = configs_[i];
+        const PortRuntime& rt = runtimes_[i];
+        const char* sep = (i > 0) ? " | " : "";
+        const int n = snprintf(
+            resp_buf_ + used,
+            sizeof(resp_buf_) - used,
+            "%sPORT=%u BAUD=%lu FORMAT=%u%c%u LEN=%u PPS=%u EN=%u SEQ=%lu",
+            sep,
+            static_cast<unsigned>(i),
+            static_cast<unsigned long>(cfg.baud),
+            static_cast<unsigned>(cfg.data_bits),
+            parity_char(cfg.parity),
+            static_cast<unsigned>(cfg.stop_bits),
+            static_cast<unsigned>(cfg.payload_len),
+            static_cast<unsigned>(cfg.pps),
+            rt.enabled ? 1U : 0U,
+            static_cast<unsigned long>(rt.seq));
+        if (n < 0) {
+            return set_error("ERR INTERNAL fmt");
+        }
+        if (static_cast<size_t>(n) >= (sizeof(resp_buf_) - used)) {
+            used = sizeof(resp_buf_) - 1;
+            resp_buf_[used] = '\0';
+            break;
+        }
+        used += static_cast<size_t>(n);
+    }
+    return resp_buf_;
+}
+
+size_t QuadUartController::tokenize_upper(char* line, char* tokens[kMaxTokens]) const {
+    for (size_t i = 0; line[i] != '\0'; i++) {
+        line[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(line[i])));
+    }
+
+    size_t count = 0;
+    char* p = line;
+    while (*p != '\0') {
+        while (*p != '\0' && std::isspace(static_cast<unsigned char>(*p)) != 0) {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        if (count >= kMaxTokens) {
+            return kMaxTokens + 1;
+        }
+        tokens[count++] = p;
+        while (*p != '\0' && std::isspace(static_cast<unsigned char>(*p)) == 0) {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        *p = '\0';
+        p++;
+    }
+    return count;
+}
+
+const char* QuadUartController::enable_port(uint8_t port_id, uint32_t now_us) {
     if (writer_ == nullptr) {
         return "ERR UNSUPPORTED no-writer";
     }
@@ -174,7 +259,7 @@ std::string QuadUartController::enable_port(uint8_t port_id, uint32_t now_us) {
     return "OK";
 }
 
-std::string QuadUartController::disable_port(uint8_t port_id) {
+const char* QuadUartController::disable_port(uint8_t port_id) {
     PortRuntime& rt = runtimes_[port_id];
     rt.enabled = false;
     rt.tx_in_progress = false;
@@ -183,108 +268,135 @@ std::string QuadUartController::disable_port(uint8_t port_id) {
     return "OK";
 }
 
-std::string QuadUartController::handle_command(const std::string& line, uint32_t now_us) {
-    const std::string t = trim_copy(line);
-    if (t.empty()) {
-        return "ERR BAD_CMD empty";
+const char* QuadUartController::port_show(uint8_t port_id) {
+    return set_port_show(port_id);
+}
+
+// cppcheck-suppress unusedFunction
+const char* QuadUartController::handle_command(const char* line, uint32_t now_us) {
+    if (line == nullptr) {
+        return set_error("ERR BAD_CMD empty");
     }
 
-    const std::vector<std::string> tokens = split_ws_upper(t);
-    if (tokens.empty()) {
-        return "ERR BAD_CMD empty";
+    const size_t n = bounded_strlen(line, kCmdLineMax + 1);
+    if (n == 0) {
+        return set_error("ERR BAD_CMD empty");
+    }
+    if (n > kCmdLineMax) {
+        return set_error("ERR BAD_CMD line-too-long");
     }
 
-    if (tokens[0] == "HELP") {
-        return "OK HELP STATUS PORT <id> SHOW PORT <id> CFG BAUD|FORMAT|LEN|PPS <v> PORT <id> ENABLE|DISABLE ALL ENABLE|DISABLE";
+    char line_buf[kCmdLineMax + 1];
+    memcpy(line_buf, line, n);
+    line_buf[n] = '\0';
+
+    size_t start = 0;
+    while (line_buf[start] != '\0' && std::isspace(static_cast<unsigned char>(line_buf[start])) != 0) {
+        start++;
+    }
+    if (line_buf[start] == '\0') {
+        return set_error("ERR BAD_CMD empty");
+    }
+    size_t end = n;
+    while (end > start && std::isspace(static_cast<unsigned char>(line_buf[end - 1])) != 0) {
+        end--;
+    }
+    line_buf[end] = '\0';
+
+    char* tokens[kMaxTokens] = {nullptr};
+    const size_t token_count = tokenize_upper(line_buf + start, tokens);
+    if (token_count == 0) {
+        return set_error("ERR BAD_CMD empty");
+    }
+    if (token_count > kMaxTokens) {
+        return set_error("ERR BAD_CMD too-many-tokens");
     }
 
-    if (tokens[0] == "STATUS") {
-        std::ostringstream oss;
-        for (uint8_t i = 0; i < kPortCount; i++) {
-            if (i > 0) {
-                oss << " | ";
-            }
-            oss << port_show(i);
+    if (strcmp(tokens[0], "HELP") == 0) {
+        return set_error(
+            "OK HELP STATUS PORT <id> SHOW PORT <id> CFG BAUD|FORMAT|LEN|PPS <v> PORT <id> ENABLE|DISABLE ALL ENABLE|DISABLE");
+    }
+
+    if (strcmp(tokens[0], "STATUS") == 0) {
+        return set_status_all();
+    }
+
+    if (strcmp(tokens[0], "ALL") == 0) {
+        if (token_count != 2) {
+            return set_error("ERR BAD_CMD all-args");
         }
-        return oss.str();
-    }
-
-    if (tokens[0] == "ALL") {
-        if (tokens.size() != 2) {
-            return "ERR BAD_CMD all-args";
-        }
-        if (tokens[1] == "ENABLE") {
+        if (strcmp(tokens[1], "ENABLE") == 0) {
             for (uint8_t i = 0; i < kPortCount; i++) {
-                const std::string r = enable_port(i, now_us);
-                if (r != "OK") {
-                    return r;
+                const char* r = enable_port(i, now_us);
+                if (strcmp(r, "OK") != 0) {
+                    return set_error(r);
                 }
             }
-            return "OK";
+            return set_error("OK");
         }
-        if (tokens[1] == "DISABLE") {
+        if (strcmp(tokens[1], "DISABLE") == 0) {
             for (uint8_t i = 0; i < kPortCount; i++) {
                 disable_port(i);
             }
-            return "OK";
+            return set_error("OK");
         }
-        return "ERR BAD_CMD all-op";
+        return set_error("ERR BAD_CMD all-op");
     }
 
-    if (tokens[0] != "PORT" || tokens.size() < 3) {
-        return "ERR BAD_CMD syntax";
+    if (strcmp(tokens[0], "PORT") != 0 || token_count < 3) {
+        return set_error("ERR BAD_CMD syntax");
     }
 
     uint32_t port_u32 = 0;
     if (parse_u32(tokens[1], &port_u32) == false || port_u32 > 255U) {
-        return "ERR BAD_PORT value";
+        return set_error("ERR BAD_PORT value");
     }
     const uint8_t port_id = static_cast<uint8_t>(port_u32);
     if (valid_port(port_id) == false) {
-        return "ERR BAD_PORT range";
+        return set_error("ERR BAD_PORT range");
     }
 
-    if (tokens[2] == "SHOW") {
-        if (tokens.size() != 3) {
-            return "ERR BAD_CMD show-args";
+    if (strcmp(tokens[2], "SHOW") == 0) {
+        if (token_count != 3) {
+            return set_error("ERR BAD_CMD show-args");
         }
         return port_show(port_id);
     }
 
-    if (tokens[2] == "ENABLE") {
-        if (tokens.size() != 3) {
-            return "ERR BAD_CMD enable-args";
+    if (strcmp(tokens[2], "ENABLE") == 0) {
+        if (token_count != 3) {
+            return set_error("ERR BAD_CMD enable-args");
         }
-        return enable_port(port_id, now_us);
+        return set_error(enable_port(port_id, now_us));
     }
 
-    if (tokens[2] == "DISABLE") {
-        if (tokens.size() != 3) {
-            return "ERR BAD_CMD disable-args";
+    if (strcmp(tokens[2], "DISABLE") == 0) {
+        if (token_count != 3) {
+            return set_error("ERR BAD_CMD disable-args");
         }
-        return disable_port(port_id);
+        return set_error(disable_port(port_id));
     }
 
-    if (tokens[2] != "CFG" || tokens.size() != 5) {
-        return "ERR BAD_CMD cfg-syntax";
+    if (strcmp(tokens[2], "CFG") != 0 || token_count != 5) {
+        return set_error("ERR BAD_CMD cfg-syntax");
     }
 
     if (any_enabled()) {
-        return "ERR BUSY outputs-enabled";
+        return set_error("ERR BUSY outputs-enabled");
     }
 
     PortConfig trial = configs_[port_id];
 
-    if (tokens[3] == "BAUD") {
+    if (strcmp(tokens[3], "BAUD") == 0) {
         uint32_t v = 0;
         if (parse_u32(tokens[4], &v) == false) {
-            return "ERR BAD_VALUE baud";
+            return set_error("ERR BAD_VALUE baud");
         }
         trial.baud = v;
-    } else if (tokens[3] == "FORMAT") {
+    } else if (strcmp(tokens[3], "FORMAT") == 0) {
         ParsedFormat pf{};
-        if (parse_format_token(tokens[4].c_str(), &pf) == false) {
-            return "ERR BAD_VALUE format";
+        if (parse_format_token(tokens[4], &pf) == false) {
+            return set_error("ERR BAD_VALUE format");
         }
         trial.data_bits = pf.data_bits;
         trial.stop_bits = pf.stop_bits;
@@ -295,28 +407,28 @@ std::string QuadUartController::handle_command(const std::string& line, uint32_t
         } else {
             trial.parity = ParityMode::None;
         }
-    } else if (tokens[3] == "LEN") {
+    } else if (strcmp(tokens[3], "LEN") == 0) {
         uint32_t v = 0;
         if (parse_u32(tokens[4], &v) == false || v > 255U) {
-            return "ERR BAD_VALUE len";
+            return set_error("ERR BAD_VALUE len");
         }
         trial.payload_len = static_cast<uint8_t>(v);
-    } else if (tokens[3] == "PPS") {
+    } else if (strcmp(tokens[3], "PPS") == 0) {
         uint32_t v = 0;
         if (parse_u32(tokens[4], &v) == false || v > 65535U) {
-            return "ERR BAD_VALUE pps";
+            return set_error("ERR BAD_VALUE pps");
         }
         trial.pps = static_cast<uint16_t>(v);
     } else {
-        return "ERR BAD_CMD cfg-key";
+        return set_error("ERR BAD_CMD cfg-key");
     }
 
     if (validate_config(trial) == false) {
-        return "ERR BAD_VALUE cfg";
+        return set_error("ERR BAD_VALUE cfg");
     }
 
     configs_[port_id] = trial;
-    return "OK";
+    return set_error("OK");
 }
 
 void QuadUartController::drain_tx(uint8_t port_id) {
@@ -338,6 +450,7 @@ void QuadUartController::drain_tx(uint8_t port_id) {
     }
 }
 
+// cppcheck-suppress unusedFunction
 void QuadUartController::service_tx_nonblocking(uint32_t now_us) {
     for (uint8_t port_id = 0; port_id < kPortCount; port_id++) {
         PortRuntime& rt = runtimes_[port_id];
@@ -352,7 +465,7 @@ void QuadUartController::service_tx_nonblocking(uint32_t now_us) {
             continue;
         }
 
-        if (now_us < rt.next_deadline_us) {
+        if (!time_reached(now_us, rt.next_deadline_us)) {
             continue;
         }
 
