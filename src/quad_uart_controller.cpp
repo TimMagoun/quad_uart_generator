@@ -11,6 +11,24 @@
 namespace {
 constexpr uint16_t kMinPps = 1;
 constexpr uint16_t kMaxPps = 1000;
+constexpr const char kHelpText[] =
+    "OK\n"
+    "Commands:\n"
+    "  HELP\n"
+    "  STATUS\n"
+    "  ALL ENABLE\n"
+    "  ALL DISABLE\n"
+    "  PORT <id> SHOW\n"
+    "  PORT <id> ENABLE\n"
+    "  PORT <id> DISABLE\n"
+    "  PORT <id> CFG BAUD <1..921600>\n"
+    "  PORT <id> CFG FORMAT <5N1..8O2>\n"
+    "  PORT <id> CFG LEN <10..128>\n"
+    "  PORT <id> CFG PPS <1..1000>\n"
+    "Notes:\n"
+    "  - Port id range: 0..3\n"
+    "  - Disable all outputs before any CFG change\n"
+    "  - FORMAT examples: 8N1 7E1 8O2";
 
 bool parse_u32(const char* s, uint32_t* out) {
     if (out == nullptr || s == nullptr || s[0] == '\0') {
@@ -185,7 +203,7 @@ const char* QuadUartController::set_status_all() {
     for (uint8_t i = 0; i < kPortCount; i++) {
         const PortConfig& cfg = configs_[i];
         const PortRuntime& rt = runtimes_[i];
-        const char* sep = (i > 0) ? " | " : "";
+        const char* sep = (i > 0) ? "\n\n" : "";
         const int n = snprintf(
             resp_buf_ + used,
             sizeof(resp_buf_) - used,
@@ -313,8 +331,7 @@ const char* QuadUartController::handle_command(const char* line, uint32_t now_us
     }
 
     if (strcmp(tokens[0], "HELP") == 0) {
-        return set_error(
-            "OK HELP STATUS PORT <id> SHOW PORT <id> CFG BAUD|FORMAT|LEN|PPS <v> PORT <id> ENABLE|DISABLE ALL ENABLE|DISABLE");
+        return kHelpText;
     }
 
     if (strcmp(tokens[0], "STATUS") == 0) {
