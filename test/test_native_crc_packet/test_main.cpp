@@ -1,7 +1,6 @@
 #include <unity.h>
 
 #include "packet_builder.h"
-#include "../../src/packet_builder.cpp"
 
 void test_crc16_known_vector(void) {
     const uint8_t bytes[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
