@@ -145,3 +145,10 @@ Optional static analysis:
 ```bash
 .venv/bin/pio check -e sparkfun_promicrorp2040 --skip-packages
 ```
+
+### Hardware test results:
+![Logic Analyzer](docs/images/logic_analyzer_1.png)
+Logic analyzer view of all ports at 921600 baud, 8N1, 16 byte payload, 1000 pps
+
+![Logic Analyzer](docs/images/logic_analyzer_2.png)
+Logic analyzer view of all ports at 921600 baud, 8N1, 64 byte payload, 1000 pps
